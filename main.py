@@ -1,29 +1,40 @@
 #!/usr/bin/python3
-import psycopg2, threading, string, random, socket, datetime
+import psycopg2, threading, string, random, socket, datetime, argparse
+
+PSQL=""
+SIZE = "xsmall"
+
 
 PSQL="postgres://materialize@localhost:6875/materialize"
-SIZE = "2" if "Papa" in socket.gethostname() else "xsmall"
+SIZE = "2"
 VERBOSE=False
 
 log = open("command_log.txt","w")
 log_lock = threading.Lock()
 def sqls(conn, cmds, fetch=False):
     log_lock.acquire()
-    now = datetime.datetime.now().isoformat()
     for cmd in cmds:
-        log.write(now)
+        log.write(datetime.datetime.now().isoformat())
         log.write(": ")
         log.write(cmd)
         log.write("\n")
         if VERBOSE:
             print(cmd)
     log_lock.release()
-    with conn.cursor() as cur:
-        for cmd in cmds:
-            cur.execute(cmd)
-            if fetch:
-                if VERBOSE:
-                    print(cur.fetchall())
+    try:
+        with conn.cursor() as cur:
+            for cmd in cmds:
+                cur.execute(cmd)
+                if fetch:
+                    if VERBOSE:
+                        print(cur.fetchall())
+    except Exception as e:
+        log_lock.acquire()
+        log.write(datetime.datetime.now().isoformat())
+        log.write(": EXCEPTION")
+        log.write(str(e))
+        log_lock.release()
+        raise e
 
 def sql(conn, cmd, fetch=False):
     sqls(conn, [cmd], fetch=fetch)
@@ -80,9 +91,8 @@ class MaterializedViewCreate():
         MaterializedViewCreate.next_idx += 1
     
     def do(self, conn):
-        sqls(conn, [
-            "CREATE MATERIALIZED VIEW tmp_mat_view_{} AS SELECT MIN(id) FROM input".format(self.idx),
-            ])
+        sql(conn, 
+            "CREATE MATERIALIZED VIEW tmp_mat_view_{} AS SELECT MIN(id) FROM input".format(self.idx))
 
     def undo(self, conn):
         sql(conn, "DROP MATERIALIZED VIEW tmp_mat_view_{} CASCADE".format(self.idx))
@@ -147,18 +157,19 @@ class Undo():
         Undo.done += 1
 
 
-def setup(conn):
+def setup(conn, config):
     sqls(conn, [
         "CREATE TABLE IF NOT EXISTS input (id int, data string)",
         "CREATE MATERIALIZED VIEW IF NOT EXISTS mv1 AS SELECT count(*) FROM input",
         "CREATE VIEW IF NOT EXISTS v1 AS SELECT count(*) FROM input",
         "CREATE DEFAULT INDEX IF NOT EXISTS ON v1",
     ])
-    constructors = [InputInsert, TableCreate, ViewCreate, MaterializedViewCreate, Select, ReplicaCreate]
+    #constructors = [InputInsert, TableCreate, ViewCreate, MaterializedViewCreate, Select, ReplicaCreate, Subscribe]
+    constructors = [InputInsert, TableCreate, ViewCreate, MaterializedViewCreate, Select]
     actions = random.choices(
             population=constructors, 
             weights=[x.weight for x in constructors],
-            k=1000
+            k=config.count
             )
     pending_dos = [x() for x in actions]
     pending_undos = []
@@ -183,6 +194,7 @@ def setup(conn):
             break
 
 
+    do_undo_acts = do_undo_acts * config.repetitions
     start = datetime.datetime.now()
     for i,act in enumerate(do_undo_acts):
         act(conn)
@@ -192,6 +204,13 @@ def setup(conn):
                     elapsed, i, len(do_undo_acts), Do.done, Undo.done,
                     Do.done - Undo.done))
 
+parser = argparse.ArgumentParser(description='Stress test materialize')
+parser.add_argument('-r', '--repetitions', type=int, default=1)
+parser.add_argument('-c', '--count', type=int, default=200)
+config = parser.parse_args()
+
+print("Running stresstest with count={}, repetitions={}".format(config.count, config.repetitions))
+
 conn = psycopg2.connect(PSQL)
 conn.autocommit = True
-setup(conn)
+setup(conn, config)
