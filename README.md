@@ -31,3 +31,4 @@ The created objects are very simple.
 
 Try to reproduce incident #18 by creating a source, dropping a replica, waiting until
 data accumulates and restarting that replica.
+
